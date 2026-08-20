@@ -1,10 +1,23 @@
 import sys
 import os
+from typing import Any
 from mcp.server import Server
-from mcp.types import Tool, TextContent, Resource
+from mcp.server.context import ServerRequestContext
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListResourcesResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    ReadResourceRequestParams,
+    ReadResourceResult,
+    Resource,
+    TextContent,
+    TextResourceContents,
+    Tool,
+)
 import mcp.server.stdio
 import asyncio
-from pathlib import Path
 
 # Import LangChain components
 try:
@@ -24,8 +37,9 @@ def log(message):
 
 
 # --- Configuration ---
+# Read API key from file. Make sure use the absolute path
 try:
-    with open(r"G:\MyFiles\Coding\Python\AI\apikey.txt", "r") as file:
+    with open(r"D:\MyFiles\Coding2\Python\AI\apikey.txt", "r") as file:
         api_key_str = file.read().strip()
     os.environ["OPENAI_API_KEY"] = api_key_str
     log("OpenAI API key loaded successfully")
@@ -39,17 +53,12 @@ log("Initializing embeddings and vector store...")
 try:
     embedding = OpenAIEmbeddings(model="text-embedding-3-small")
     # Make sure use the absolute path
-    vector_store = Chroma(persist_directory=r"G:\MyFiles\Coding\Python\AI\hw\home_chroma", embedding_function=embedding)
+    vector_store = Chroma(persist_directory=r"D:\MyFiles\Coding2\Python\AI\hw\home_chroma", embedding_function=embedding)
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
     log("Vector store loaded successfully")
 except Exception as e:
     log(f"ERROR initializing vector store: {e}")
     retriever = None
-
-# Create server instance
-app = Server("insurance-qa-server")
-log("Insurance QA Server instance created")
-
 
 def answer_question(question: str) -> tuple[str, list]:
     """Answer a question using retrieved context from insurance contract"""
@@ -86,111 +95,132 @@ def answer_question(question: str) -> tuple[str, list]:
 
 
 # Define tools
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools"""
-    log("list_tools() called - returning InsuranceQA tool")
-    return [
-        Tool(
-            name="InsuranceQA",
-            description="Answer questions about an insurance contract using RAG (Retrieval-Augmented Generation). Searches through the insurance contract document and provides answers with source citations. Use this for questions about coverage, limits, exclusions, definitions, or any insurance policy details.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The question to ask about the insurance contract (e.g., 'What is covered?', 'What are the coverage limits?', 'What is not covered?')"
-                    }
-                },
-                "required": ["question"]
-            }
-        ),
-        Tool(
-            name="SearchInsuranceContract",
-            description="Search the insurance contract for specific terms or concepts and return relevant passages. Use this when you need to find specific information in the contract.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query or topic (e.g., 'insured premises', 'coverage limits', 'exclusions')"
+async def list_tools(
+    _ctx: ServerRequestContext[Any],
+    _params: PaginatedRequestParams | None,
+) -> ListToolsResult:
+    log("list_tools called - returning InsuranceQA and SearchInsuranceContract tools")
+    return ListToolsResult(
+        tools=[
+            Tool(
+                name="InsuranceQA",
+                description="Answer questions about an insurance contract using RAG (Retrieval-Augmented Generation). Searches through the insurance contract document and provides answers with source citations. Use this for questions about coverage, limits, exclusions, definitions, or any insurance policy details.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question to ask about the insurance contract (e.g., 'What is covered?', 'What are the coverage limits?', 'What is not covered?')"
+                        }
                     },
-                    "num_results": {
-                        "type": "integer",
-                        "description": "Number of relevant passages to return (default: 3)",
-                        "default": 3
-                    }
-                },
-                "required": ["query"]
-            }
-        )
-    ]
+                    "required": ["question"]
+                }
+            ),
+            Tool(
+                name="SearchInsuranceContract",
+                description="Search the insurance contract for specific terms or concepts and return relevant passages. Use this when you need to find specific information in the contract.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query or topic (e.g., 'insured premises', 'coverage limits', 'exclusions')"
+                        },
+                        "num_results": {
+                            "type": "integer",
+                            "description": "Number of relevant passages to return (default: 3)",
+                            "default": 3
+                        }
+                    },
+                    "required": ["query"]
+                }
+            )
+        ]
+    )
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool execution"""
+async def call_tool(
+    _ctx: ServerRequestContext[Any],
+    params: CallToolRequestParams,
+) -> CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
     log(f"call_tool() called - tool: {name}, arguments: {arguments}")
 
     if name == "InsuranceQA":
         question = arguments["question"]
-        answer, docs = answer_question(question)
+        result, docs = answer_question(question)
         log(f"InsuranceQA answered question with {len(docs)} source documents")
-        return [TextContent(type="text", text=answer)]
 
     elif name == "SearchInsuranceContract":
         query = arguments["query"]
         num_results = arguments.get("num_results", 3)
 
         if retriever is None:
-            return [TextContent(type="text", text="Error: Vector store not initialized")]
+            result = "Error: Vector store not initialized"
+        else:
+            try:
+                # Update search kwargs for this query
+                custom_retriever = vector_store.as_retriever(search_kwargs={"k": num_results})
+                docs = custom_retriever.invoke(query)
+                log(f"SearchInsuranceContract found {len(docs)} results for: {query}")
 
-        try:
-            # Update search kwargs for this query
-            custom_retriever = vector_store.as_retriever(search_kwargs={"k": num_results})
-            docs = custom_retriever.invoke(query)
-            log(f"SearchInsuranceContract found {len(docs)} results for: {query}")
+                # Format results
+                result_parts = [f"Found {len(docs)} relevant passages for '{query}':\n"]
+                for i, doc in enumerate(docs, 1):
+                    result_parts.append(f"\n--- Passage {i} ---")
+                    result_parts.append(doc.page_content.strip())
+                    source = doc.metadata.get('source', 'Unknown')
+                    result_parts.append(f"(Source: {source})\n")
 
-            # Format results
-            result_parts = [f"Found {len(docs)} relevant passages for '{query}':\n"]
-            for i, doc in enumerate(docs, 1):
-                result_parts.append(f"\n--- Passage {i} ---")
-                result_parts.append(doc.page_content.strip())
-                source = doc.metadata.get('source', 'Unknown')
-                result_parts.append(f"(Source: {source})\n")
+                result = "\n".join(result_parts)
 
-            result = "\n".join(result_parts)
-            return [TextContent(type="text", text=result)]
+            except Exception as e:
+                log(f"ERROR in SearchInsuranceContract: {e}")
+                result = f"Error: {str(e)}"
+    else:
+        raise ValueError(f"Unknown tool: {name}")
 
-        except Exception as e:
-            log(f"ERROR in SearchInsuranceContract: {e}")
-            return [TextContent(type="text", text=f"Error: {str(e)}")]
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=result,
+            )
+        ]
+    )
 
-    raise ValueError(f"Unknown tool: {name}")
 
-
-@app.list_resources()
-async def list_resources() -> list[Resource]:
-    """List available resources"""
+async def list_resources(
+    _ctx: ServerRequestContext[Any],
+    _params: PaginatedRequestParams | None,
+) -> ListResourcesResult:
     log("list_resources() called")
-    return [
-        Resource(
-            uri="insurance://contract/info",
-            name="Insurance Contract Information",
-            mimeType="text/plain",
-            description="Information about the loaded insurance contract and vector store"
-        )
-    ]
+    return ListResourcesResult(
+        resources=[
+            Resource(
+                uri="insurance://contract/info",
+                name="Insurance Contract Information",
+                mimeType="text/plain",
+                description="Information about the loaded insurance contract and vector store"
+            )
+        ]
+    )
 
-@app.read_resource()
-async def read_resource(uri: str) -> str:
-    """Read resource content"""
+
+async def read_resource(
+    _ctx: ServerRequestContext[Any],
+    params: ReadResourceRequestParams,
+) -> ReadResourceResult:
+    uri = params.uri
     log(f"read_resource() called - uri: {uri}")
 
-    if uri == "insurance://contract/info":
-        if retriever is None:
-            return "Vector store not initialized. Check logs for errors."
+    if uri != "insurance://contract/info":
+        raise ValueError(f"Unknown resource: {uri}")
 
+    if retriever is None:
+        info = "Vector store not initialized. Check logs for errors."
+    else:
         try:
             # Get some stats about the vector store
             collection = vector_store._collection
@@ -214,11 +244,28 @@ Example Questions:
 - What are the coverage limits?
 - What is not covered by this policy?
 """
-            return info
         except Exception as e:
-            return f"Error retrieving contract info: {str(e)}"
+            info = f"Error retrieving contract info: {str(e)}"
 
-    raise ValueError(f"Unknown resource: {uri}")
+    return ReadResourceResult(
+        contents=[
+            TextResourceContents(
+                uri=uri,
+                mimeType="text/plain",
+                text=info,
+            )
+        ]
+    )
+
+
+app = Server(
+    "insurance-qa-server",
+    on_list_tools=list_tools,
+    on_call_tool=call_tool,
+    on_list_resources=list_resources,
+    on_read_resource=read_resource,
+)
+log("Insurance QA Server instance created")
 
 
 async def main():
